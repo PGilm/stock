@@ -1,0 +1,8 @@
+{
+  "tickers_input": "^dji, ^ixic, \nvtsax, ponax, \nnvct",
+  "market_input": "^GSPC",
+  "selected_period": "3 Months",
+  "show_beta": false,
+  "show_sharpe": false,
+  "risk_free_rate": 0.015
+}
