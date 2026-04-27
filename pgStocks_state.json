@@ -1,8 +1,13 @@
 {
-  "tickers_input": "^dji, ^ixic, \nvtsax, ponax, \nnvct",
+  "tickers_input": "^dji, ^ixic, ^GSPC,\nvtsax, ponax,\nFXAIX",
   "market_input": "^GSPC",
-  "selected_period": "3 Months",
+  "selected_period": "1 Year",
   "show_beta": false,
   "show_sharpe": false,
-  "risk_free_rate": 0.015
+  "risk_free_rate": 0.015,
+  "peer_source_input": "FXAIX",
+  "manual_peer_input": "",
+  "enable_auto_peers": true,
+  "include_peers_in_chart": false,
+  "peer_count": 4
 }
