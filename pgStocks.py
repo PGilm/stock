@@ -1,3 +1,5 @@
+import datetime
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -5,6 +7,7 @@ import re
 
 import matplotlib.pyplot as plt
 import pandas as pd
+from peewee import CharField, DateTimeField, ForeignKeyField, Model, SqliteDatabase, TextField
 from platformdirs import user_config_dir
 import streamlit as st
 import yfinance as yf
@@ -31,6 +34,175 @@ DEFAULT_STATE = {
     "include_peers_in_chart": True,
     "peer_count": 5,
 }
+
+AUTH_SALT = b"pgStocks_auth_salt"
+DB_FILE = Path(user_config_dir(APP_NAME, APP_NAME)) / "pgStocks_users.db"
+DATABASE = SqliteDatabase(DB_FILE, pragmas={"foreign_keys": 1})
+
+
+class BaseModel(Model):
+    class Meta:
+        database = DATABASE
+
+
+class User(BaseModel):
+    username = CharField(unique=True)
+    password_hash = CharField()
+    created_at = DateTimeField(default=datetime.datetime.utcnow)
+    last_login = DateTimeField(null=True)
+    last_used_config = CharField(null=True)
+    current_state = TextField(null=True)
+
+
+class UserConfiguration(BaseModel):
+    user = ForeignKeyField(User, backref="configurations", on_delete="CASCADE")
+    name = CharField()
+    state = TextField()
+    data_cache = TextField(null=True)
+    created_at = DateTimeField(default=datetime.datetime.utcnow)
+    updated_at = DateTimeField(default=datetime.datetime.utcnow)
+
+    class Meta:
+        indexes = ((("user", "name"), True),)
+
+
+def _hash_password(password):
+    if password is None:
+        return None
+    return hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        AUTH_SALT,
+        100_000,
+    ).hex()
+
+
+def _ensure_user_database():
+    DB_FILE.parent.mkdir(parents=True, exist_ok=True)
+    DATABASE.connect(reuse_if_open=True)
+    DATABASE.create_tables([User, UserConfiguration])
+
+
+_ensure_user_database()
+
+
+def _json_dumps(value):
+    return json.dumps(value, indent=2, default=str)
+
+
+def _json_loads(value):
+    if not value:
+        return None
+    try:
+        return json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return None
+
+
+def _authenticate_user(username, password):
+    if not username or not password:
+        return None
+    user = User.get_or_none(User.username == str(username).strip())
+    if user and user.password_hash == _hash_password(password):
+        user.last_login = datetime.datetime.utcnow()
+        user.save()
+        return user
+    return None
+
+
+def _create_user(username, password):
+    name = str(username or "").strip()
+    if not name or not password:
+        return None
+    if User.get_or_none(User.username == name):
+        return None
+    return User.create(
+        username=name,
+        password_hash=_hash_password(password),
+        created_at=datetime.datetime.utcnow(),
+    )
+
+
+def _load_user_store(username):
+    user = User.get_or_none(User.username == str(username).strip())
+    if not user:
+        return _default_store()
+
+    saved_configurations = {}
+    for config in UserConfiguration.select().where(UserConfiguration.user == user):
+        configuration_state = _normalize_state(_json_loads(config.state) or {})
+        configuration_data_cache = _json_loads(config.data_cache)
+        saved_configurations[config.name] = {
+            "name": config.name,
+            "state": configuration_state,
+            "data_cache": configuration_data_cache,
+            "created_at": config.created_at.isoformat(),
+            "updated_at": config.updated_at.isoformat(),
+        }
+
+    selected_configuration = (
+        user.last_used_config
+        if user.last_used_config in saved_configurations
+        else None
+    )
+
+    if selected_configuration:
+        current_state = _normalize_state(
+            saved_configurations[selected_configuration]["state"]
+        )
+    else:
+        current_state = _normalize_state(_json_loads(user.current_state) or DEFAULT_STATE.copy())
+
+    return {
+        "current_state": current_state,
+        "saved_configurations": saved_configurations,
+        "selected_configuration": selected_configuration,
+    }
+
+
+def _save_user_store(username, store):
+    user = User.get_or_none(User.username == str(username).strip())
+    if not user:
+        return
+
+    user.current_state = _json_dumps(store.get("current_state", DEFAULT_STATE.copy()))
+    user.last_used_config = store.get("selected_configuration")
+    user.save()
+
+    existing_configs = {
+        config.name: config
+        for config in UserConfiguration.select().where(UserConfiguration.user == user)
+    }
+
+    for name, payload in (store.get("saved_configurations") or {}).items():
+        data_cache = payload.get("data_cache")
+        if name in existing_configs:
+            existing_configs[name].state = _json_dumps(payload.get("state", {}))
+            existing_configs[name].data_cache = _json_dumps(data_cache) if data_cache else None
+            existing_configs[name].updated_at = datetime.datetime.utcnow()
+            existing_configs[name].save()
+        else:
+            UserConfiguration.create(
+                user=user,
+                name=name,
+                state=_json_dumps(payload.get("state", {})),
+                data_cache=_json_dumps(data_cache) if data_cache else None,
+                created_at=datetime.datetime.utcnow(),
+                updated_at=datetime.datetime.utcnow(),
+            )
+
+
+def load_application_store():
+    if st.session_state.get("logged_in_user"):
+        return _load_user_store(st.session_state["logged_in_user"])
+    return load_state_store()
+
+
+def save_application_store(store):
+    if st.session_state.get("logged_in_user"):
+        _save_user_store(st.session_state["logged_in_user"], store)
+    else:
+        save_state_store(store)
 
 
 class TransientLookupError(RuntimeError):
@@ -1213,10 +1385,84 @@ def build_stock_peer_table(manual_peers, auto_peers, peer_source):
 
 st.title("Stock Performance Tracker")
 
-state_store = load_state_store()
+if "logged_in_user" not in st.session_state:
+    st.session_state["logged_in_user"] = None
+if "login_feedback" not in st.session_state:
+    st.session_state["login_feedback"] = None
+if "login_username" not in st.session_state:
+    st.session_state["login_username"] = ""
+if "login_password" not in st.session_state:
+    st.session_state["login_password"] = ""
+
+with st.sidebar.expander("User sign-in", expanded=True):
+    if st.session_state["logged_in_user"]:
+        st.success(f"Signed in as {st.session_state['logged_in_user']}")
+        if st.button("Sign Out", key="sign_out"):
+            st.session_state["logged_in_user"] = None
+            st.session_state["login_feedback"] = {
+                "level": "info",
+                "message": "Signed out successfully."
+            }
+            st.experimental_rerun()
+    else:
+        st.text_input("Username", key="login_username")
+        st.text_input("Password", type="password", key="login_password")
+        auth_col1, auth_col2 = st.columns(2)
+        with auth_col1:
+            if st.button("Sign In", key="sign_in"):
+                user = _authenticate_user(
+                    st.session_state["login_username"],
+                    st.session_state["login_password"],
+                )
+                if user:
+                    st.session_state["logged_in_user"] = user.username
+                    st.session_state["login_feedback"] = {
+                        "level": "success",
+                        "message": f"Signed in as {user.username}."
+                    }
+                    st.experimental_rerun()
+                else:
+                    st.session_state["login_feedback"] = {
+                        "level": "error",
+                        "message": "Invalid username or password."
+                    }
+        with auth_col2:
+            if st.button("Register", key="register"):
+                user = _create_user(
+                    st.session_state["login_username"],
+                    st.session_state["login_password"],
+                )
+                if user:
+                    st.session_state["logged_in_user"] = user.username
+                    st.session_state["login_feedback"] = {
+                        "level": "success",
+                        "message": f"Account created and signed in as {user.username}."
+                    }
+                    st.experimental_rerun()
+                else:
+                    st.session_state["login_feedback"] = {
+                        "level": "warning",
+                        "message": "Choose a unique username and a non-empty password."
+                    }
+
+    if st.session_state["login_feedback"]:
+        getattr(
+            st,
+            st.session_state["login_feedback"].get("level", "info"),
+        )(st.session_state["login_feedback"]["message"])
+
+state_store = load_application_store()
 saved_state = state_store["current_state"]
 saved_configurations = state_store["saved_configurations"]
 selected_configuration = state_store["selected_configuration"]
+
+current_store_identity = (
+    f"{st.session_state.get('logged_in_user') or 'guest'}:"
+    f"{selected_configuration or ''}"
+)
+if st.session_state.get("loaded_store_identity") != current_store_identity:
+    _apply_state_to_session(saved_state, selected_configuration)
+    st.session_state["loaded_store_identity"] = current_store_identity
 
 period_options = {
     "5 Years": pd.DateOffset(years=5),
@@ -1325,7 +1571,7 @@ if load_selected_clicked:
         )
         state_store["saved_configurations"] = saved_configurations
         state_store["selected_configuration"] = selected_saved_name
-        save_state_store(state_store)
+        save_application_store(state_store)
         st.session_state["config_feedback"] = {
             "level": "success",
             "message": f'Loaded "{selected_saved_name}".',
@@ -1436,7 +1682,7 @@ else:
 state_store["current_state"] = current_state
 state_store["saved_configurations"] = saved_configurations
 state_store["selected_configuration"] = active_config_name if active_config_entry else None
-save_state_store(state_store)
+save_application_store(state_store)
 
 if not tickers:
     st.error("Please enter at least one ticker symbol.")
@@ -1551,7 +1797,7 @@ if (
     active_config_entry = saved_configurations[active_config_name]
     state_store["saved_configurations"] = saved_configurations
     state_store["selected_configuration"] = active_config_name
-    save_state_store(state_store)
+    save_application_store(state_store)
     auto_cache_message = (
         f'Saved data snapshot refreshed through {current_data_cache["data_end"]}.'
     )
@@ -1576,7 +1822,7 @@ if save_new_clicked:
         }
         state_store["saved_configurations"] = saved_configurations
         state_store["selected_configuration"] = new_name
-        save_state_store(state_store)
+        save_application_store(state_store)
         if current_data_cache:
             message = f'Saved "{new_name}" with the current price snapshot.'
         else:
@@ -1606,7 +1852,7 @@ if update_loaded_clicked:
         }
         state_store["saved_configurations"] = saved_configurations
         state_store["selected_configuration"] = target_name
-        save_state_store(state_store)
+        save_application_store(state_store)
         if current_data_cache:
             message = f'Updated "{target_name}" and refreshed its saved price snapshot.'
         else:
