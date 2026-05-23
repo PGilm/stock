@@ -1403,7 +1403,7 @@ with st.sidebar.expander("User sign-in", expanded=True):
                 "level": "info",
                 "message": "Signed out successfully."
             }
-            st.experimental_rerun()
+            st.rerun()
     else:
         st.text_input("Username", key="login_username")
         st.text_input("Password", type="password", key="login_password")
@@ -1420,7 +1420,7 @@ with st.sidebar.expander("User sign-in", expanded=True):
                         "level": "success",
                         "message": f"Signed in as {user.username}."
                     }
-                    st.experimental_rerun()
+                    st.rerun()
                 else:
                     st.session_state["login_feedback"] = {
                         "level": "error",
@@ -1438,7 +1438,7 @@ with st.sidebar.expander("User sign-in", expanded=True):
                         "level": "success",
                         "message": f"Account created and signed in as {user.username}."
                     }
-                    st.experimental_rerun()
+                    st.rerun()
                 else:
                     st.session_state["login_feedback"] = {
                         "level": "warning",
