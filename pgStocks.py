@@ -27,7 +27,7 @@ DEFAULT_STATE = {
     "selected_period": "5 Years",
     "show_beta": True,
     "show_sharpe": False,
-    "risk_free_rate": 0.0,
+    "risk_free_rate": 0.035,
     "peer_source_input": "VTSAX",
     "manual_peer_input": "",
     "enable_auto_peers": True,
@@ -116,11 +116,35 @@ def _create_user(username, password):
         return None
     if User.get_or_none(User.username == name):
         return None
-    return User.create(
+
+    user = User.create(
         username=name,
         password_hash=_hash_password(password),
         created_at=datetime.datetime.utcnow(),
+        last_used_config="Default",
+        current_state=_json_dumps(DEFAULT_STATE.copy()),
     )
+
+    UserConfiguration.create(
+        user=user,
+        name="Default",
+        state=_json_dumps(DEFAULT_STATE.copy()),
+        data_cache=None,
+        created_at=datetime.datetime.utcnow(),
+        updated_at=datetime.datetime.utcnow(),
+    )
+
+    return user
+
+
+def _delete_user(username):
+    if not username:
+        return False
+    user = User.get_or_none(User.username == str(username).strip())
+    if not user:
+        return False
+    user.delete_instance(recursive=True, delete_nullable=True)
+    return True
 
 
 def _load_user_store(username):
@@ -145,6 +169,19 @@ def _load_user_store(username):
         if user.last_used_config in saved_configurations
         else None
     )
+
+    if not selected_configuration and "Default" in saved_configurations:
+        selected_configuration = "Default"
+
+    if not saved_configurations:
+        saved_configurations["Default"] = {
+            "name": "Default",
+            "state": _normalize_state(DEFAULT_STATE.copy()),
+            "data_cache": None,
+            "created_at": datetime.datetime.utcnow().isoformat(),
+            "updated_at": datetime.datetime.utcnow().isoformat(),
+        }
+        selected_configuration = "Default"
 
     if selected_configuration:
         current_state = _normalize_state(
@@ -729,10 +766,10 @@ def _build_security_display_names(tickers):
 
     display_names = {}
     for ticker, name in raw_names.items():
-        if name_counts.get(name, 0) > 1 and name != ticker:
-            display_names[ticker] = f"{name} ({ticker})"
+        if name == ticker or not name:
+            display_names[ticker] = ticker
         else:
-            display_names[ticker] = name
+            display_names[ticker] = f"{ticker} - {name}"
 
     return display_names
 
@@ -1384,6 +1421,7 @@ def build_stock_peer_table(manual_peers, auto_peers, peer_source):
 
 
 st.title("Stock Performance Tracker")
+status_line = st.empty()
 
 if "logged_in_user" not in st.session_state:
     st.session_state["logged_in_user"] = None
@@ -1404,6 +1442,19 @@ with st.sidebar.expander("User sign-in", expanded=True):
                 "message": "Signed out successfully."
             }
             st.rerun()
+        if st.button("Delete Account", key="delete_account"):
+            if _delete_user(st.session_state["logged_in_user"]):
+                st.session_state["logged_in_user"] = None
+                st.session_state["login_feedback"] = {
+                    "level": "info",
+                    "message": "Account deleted successfully."
+                }
+                st.rerun()
+            else:
+                st.session_state["login_feedback"] = {
+                    "level": "error",
+                    "message": "Could not delete the account."
+                }
     else:
         st.text_input("Username", key="login_username")
         st.text_input("Password", type="password", key="login_password")
@@ -1669,6 +1720,17 @@ config_is_dirty = bool(
     active_config_entry
     and current_state != _normalize_state(active_config_entry.get("state"))
 )
+
+user_display = st.session_state.get("logged_in_user") or "guest"
+loaded_config_display = active_config_name or "Current unsaved configuration"
+status_message = f"User: {user_display} · Configuration: {loaded_config_display}"
+if active_config_entry:
+    status_message += " (modified since saving)" if config_is_dirty else " (saved)"
+elif not active_config_entry and active_config_name:
+    status_message += " (modified since saving)"
+else:
+    status_message += " (unsaved)"
+status_line.write(status_message)
 
 if active_config_entry:
     status_text = f'Loaded configuration: "{active_config_name}"'
@@ -2025,27 +2087,6 @@ else:
     else:
         st.caption(f"Peer source: {peer_source} ({source_name})")
 
-    if auto_peers:
-        if peer_source_mode == "fund":
-            st.caption(
-                f"Showing {len(auto_peers)} automatic peers for a target of {requested_auto_peer_count}. "
-                "The list keeps providers distinct where possible and leans toward larger AUM."
-            )
-        elif peer_source_mode == "stock":
-            st.caption(
-                f"Showing {len(auto_peers)} automatic stock peers for a target of {requested_auto_peer_count}. "
-                "The list prefers same-industry companies on primary exchanges and leans toward similar market caps."
-            )
-        else:
-            st.caption(
-                f"Showing {len(auto_peers)} automatic peers for a target of {requested_auto_peer_count}."
-            )
-        if peer_lookup_note:
-            st.caption(peer_lookup_note)
-    elif enable_auto_peers and not peer_lookup_error:
-        st.caption(
-            f"No automatic peers were available for a target of {requested_auto_peer_count}."
-        )
     if peer_lookup_error and enable_auto_peers:
         st.info(f"Automatic peer lookup is unavailable right now: {peer_lookup_error}")
 
