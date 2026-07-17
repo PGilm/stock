@@ -12,6 +12,14 @@ from platformdirs import user_config_dir
 import streamlit as st
 import yfinance as yf
 
+from ticker_cache import (
+    fetch_history_with_cache,
+    initialize_ticker_cache_database,
+    load_ticker_cache_entry,
+    refresh_ticker_history,
+    refresh_ticker_metadata,
+)
+
 st.set_page_config(page_title="Stock Performance Tracker")
 
 APP_NAME = "pgStocks"
@@ -84,6 +92,7 @@ def _ensure_user_database():
 
 
 _ensure_user_database()
+initialize_ticker_cache_database()
 
 
 def _json_dumps(value):
@@ -653,13 +662,22 @@ def _download_close_prices(symbols, start, end):
     if pd.Timestamp(start) >= pd.Timestamp(end):
         return pd.DataFrame(columns=dedupe_tickers(symbols))
 
-    data = yf.download(symbols, start=start, end=end, progress=False)
-    if data.empty:
+    frames = []
+    for symbol in dedupe_tickers(symbols):
+        history_frame, info = fetch_history_with_cache(symbol, start, end)
+        if history_frame is None or history_frame.empty:
+            continue
+        if isinstance(history_frame, pd.DataFrame):
+            frame = history_frame.copy()
+            frame.columns = [str(symbol).upper()]
+            frames.append(frame)
+
+    if not frames:
         return pd.DataFrame(columns=dedupe_tickers(symbols))
 
-    prices = _ensure_price_frame(data["Close"])
-    prices.columns = [str(column).upper() for column in prices.columns]
-    return prices.sort_index()
+    combined = pd.concat(frames, axis=1).sort_index()
+    combined = combined[~combined.index.duplicated(keep="last")]
+    return combined
 
 
 def _combine_price_frames(frames, expected_symbols):
@@ -682,7 +700,14 @@ def fetch_prices_with_cache(symbols, start, end, data_cache=None):
     refreshed_cache = False
 
     if cached_prices is None or cached_prices.empty:
-        return _download_close_prices(expected_symbols, start, end), {
+        downloaded_prices = _download_close_prices(expected_symbols, start, end)
+        if not downloaded_prices.empty:
+            return downloaded_prices, {
+                "message": "Loaded prices from the shared ticker cache.",
+                "used_saved_cache": False,
+                "refreshed_cache": True,
+            }
+        return pd.DataFrame(columns=expected_symbols), {
             "message": None,
             "used_saved_cache": False,
             "refreshed_cache": False,
@@ -905,13 +930,23 @@ def _normalize_strategy_name(value):
 
 @st.cache_data(show_spinner=False, ttl=3600)
 def _fetch_security_metadata_cached(ticker):
-    metadata = _empty_security_metadata(ticker)
+    normalized_ticker = str(ticker or "").strip().upper()
+    cached_entry = load_ticker_cache_entry(normalized_ticker)
+    if cached_entry and cached_entry.metadata:
+        metadata = _empty_security_metadata(normalized_ticker)
+        metadata.update(cached_entry.metadata)
+        metadata["ticker"] = normalized_ticker
+        metadata["name"] = metadata.get("name") or normalized_ticker
+        return metadata
+
+    metadata = _empty_security_metadata(normalized_ticker)
     try:
-        instrument = yf.Ticker(ticker)
+        instrument = yf.Ticker(normalized_ticker)
     except Exception as exc:
         if _is_transient_lookup_error(exc):
             raise TransientLookupError(str(exc)) from exc
         metadata["error"] = str(exc)
+        refresh_ticker_metadata(normalized_ticker, {"error": str(exc)})
         return metadata
 
     info = {}
@@ -923,7 +958,7 @@ def _fetch_security_metadata_cached(ticker):
 
     metadata["name"] = _first_present(
         info, ("longName", "shortName", "displayName", "name")
-    ) or ticker
+    ) or normalized_ticker
     metadata["quote_type"] = (
         _first_present(info, ("quoteType", "quote_type")) or ""
     ).upper() or None
@@ -947,9 +982,11 @@ def _fetch_security_metadata_cached(ticker):
     metadata["currency"] = _first_present(info, ("currency", "financialCurrency"))
 
     if _is_equity_quote_type(metadata["quote_type"]):
+        refresh_ticker_metadata(normalized_ticker, metadata)
         return metadata
 
     if metadata["category"] and metadata["family"]:
+        refresh_ticker_metadata(normalized_ticker, metadata)
         return metadata
 
     fund_overview_error = None
@@ -974,6 +1011,7 @@ def _fetch_security_metadata_cached(ticker):
                 raise TransientLookupError(combined_error)
             metadata["error"] = combined_error
 
+    refresh_ticker_metadata(normalized_ticker, metadata)
     return metadata
 
 
