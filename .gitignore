@@ -2,8 +2,13 @@
 .DS_Store
 pgStocks_state.json
 
+.vscode/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
+__pycache__
+.pytest_cache/
+.pytest_cache
 *.py[cod]
 *$py.class
 
