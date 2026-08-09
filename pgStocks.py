@@ -70,7 +70,7 @@ class UserConfiguration(BaseModel):
     created_at = DateTimeField(default=datetime.datetime.utcnow)
     updated_at = DateTimeField(default=datetime.datetime.utcnow)
 
-    class Meta:
+    class Meta(BaseModel.Meta):
         indexes = ((("user", "name"), True),)
 
 
@@ -1967,6 +1967,7 @@ if update_loaded_clicked:
 
 if price_fetch_info["message"]:
     st.sidebar.caption(price_fetch_info["message"])
+
 if auto_cache_message:
     st.sidebar.caption(auto_cache_message)
 
