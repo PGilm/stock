@@ -48,6 +48,14 @@ DB_FILE = Path(user_config_dir(APP_NAME, APP_NAME)) / "pgStocks_users.db"
 DATABASE = SqliteDatabase(DB_FILE, pragmas={"foreign_keys": 1})
 
 
+def _utc_now():
+    return datetime.datetime.now(datetime.UTC).replace(tzinfo=None)
+
+
+def _utc_now_iso():
+    return _utc_now().isoformat()
+
+
 class BaseModel(Model):
     class Meta:
         database = DATABASE
@@ -56,7 +64,7 @@ class BaseModel(Model):
 class User(BaseModel):
     username = CharField(unique=True)
     password_hash = CharField()
-    created_at = DateTimeField(default=datetime.datetime.utcnow)
+    created_at = DateTimeField(default=_utc_now)
     last_login = DateTimeField(null=True)
     last_used_config = CharField(null=True)
     current_state = TextField(null=True)
@@ -67,10 +75,11 @@ class UserConfiguration(BaseModel):
     name = CharField()
     state = TextField()
     data_cache = TextField(null=True)
-    created_at = DateTimeField(default=datetime.datetime.utcnow)
-    updated_at = DateTimeField(default=datetime.datetime.utcnow)
+    created_at = DateTimeField(default=_utc_now)
+    updated_at = DateTimeField(default=_utc_now)
 
-    class Meta(BaseModel.Meta):
+    class Meta:
+        database = DATABASE
         indexes = ((("user", "name"), True),)
 
 
@@ -113,7 +122,7 @@ def _authenticate_user(username, password):
         return None
     user = User.get_or_none(User.username == str(username).strip())
     if user and user.password_hash == _hash_password(password):
-        user.last_login = datetime.datetime.utcnow()
+        user.last_login = _utc_now()
         user.save()
         return user
     return None
@@ -129,7 +138,7 @@ def _create_user(username, password):
     user = User.create(
         username=name,
         password_hash=_hash_password(password),
-        created_at=datetime.datetime.utcnow(),
+        created_at=_utc_now(),
         last_used_config="Default",
         current_state=_json_dumps(DEFAULT_STATE.copy()),
     )
@@ -139,8 +148,8 @@ def _create_user(username, password):
         name="Default",
         state=_json_dumps(DEFAULT_STATE.copy()),
         data_cache=None,
-        created_at=datetime.datetime.utcnow(),
-        updated_at=datetime.datetime.utcnow(),
+        created_at=_utc_now(),
+        updated_at=_utc_now(),
     )
 
     return user
@@ -187,8 +196,8 @@ def _load_user_store(username):
             "name": "Default",
             "state": _normalize_state(DEFAULT_STATE.copy()),
             "data_cache": None,
-            "created_at": datetime.datetime.utcnow().isoformat(),
-            "updated_at": datetime.datetime.utcnow().isoformat(),
+            "created_at": _utc_now_iso(),
+            "updated_at": _utc_now_iso(),
         }
         selected_configuration = "Default"
 
@@ -225,7 +234,7 @@ def _save_user_store(username, store):
         if name in existing_configs:
             existing_configs[name].state = _json_dumps(payload.get("state", {}))
             existing_configs[name].data_cache = _json_dumps(data_cache) if data_cache else None
-            existing_configs[name].updated_at = datetime.datetime.utcnow()
+            existing_configs[name].updated_at = _utc_now()
             existing_configs[name].save()
         else:
             UserConfiguration.create(
@@ -233,8 +242,8 @@ def _save_user_store(username, store):
                 name=name,
                 state=_json_dumps(payload.get("state", {})),
                 data_cache=_json_dumps(data_cache) if data_cache else None,
-                created_at=datetime.datetime.utcnow(),
-                updated_at=datetime.datetime.utcnow(),
+                created_at=_utc_now(),
+                updated_at=_utc_now(),
             )
 
 
@@ -611,7 +620,7 @@ def _apply_state_to_session(state, configuration_name=None):
 
 
 def _build_saved_configuration(name, state, data_cache=None, existing_entry=None):
-    timestamp = pd.Timestamp.utcnow().isoformat()
+    timestamp = _utc_now_iso()
     return {
         "name": name,
         "state": _normalize_state(state),
@@ -675,7 +684,7 @@ def _download_close_prices(symbols, start, end):
     if not frames:
         return pd.DataFrame(columns=dedupe_tickers(symbols))
 
-    combined = pd.concat(frames, axis=1).sort_index()
+    combined = pd.concat(frames, axis=1, sort=False).sort_index()
     combined = combined[~combined.index.duplicated(keep="last")]
     return combined
 
@@ -685,7 +694,7 @@ def _combine_price_frames(frames, expected_symbols):
     if not valid_frames:
         return pd.DataFrame(columns=dedupe_tickers(expected_symbols))
 
-    combined = pd.concat(valid_frames).sort_index()
+    combined = pd.concat(valid_frames, sort=False).sort_index()
     combined = combined[~combined.index.duplicated(keep="last")]
     ordered_columns = [symbol for symbol in dedupe_tickers(expected_symbols) if symbol in combined]
     return combined[ordered_columns]
@@ -764,7 +773,7 @@ def _build_price_cache_payload(symbols, prices, start, end):
         "data_start": _format_timestamp(cached_prices.index.min()),
         "data_end": _format_timestamp(cached_prices.index.max()),
         "rows": int(len(cached_prices.index)),
-        "stored_at": pd.Timestamp.utcnow().isoformat(),
+        "stored_at": _utc_now_iso(),
         "prices": _serialize_price_frame(cached_prices),
     }
 

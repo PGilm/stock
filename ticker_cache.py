@@ -19,6 +19,8 @@ from platformdirs import user_config_dir
 APP_NAME = "pgStocks"
 DEFAULT_CACHE_DB = Path(user_config_dir(APP_NAME, APP_NAME)) / "pgStocks_ticker_cache.db"
 DATABASE = SqliteDatabase(str(DEFAULT_CACHE_DB), pragmas={"foreign_keys": 1})
+def _utc_now():
+    return dt.datetime.now(dt.UTC).replace(tzinfo=None)
 
 
 class TickerMetadataCacheEntryModel(Model):
@@ -37,8 +39,8 @@ class TickerMetadataCacheEntryModel(Model):
     error = TextField(null=True)
     metadata_json = TextField(null=True)
     last_checked_at = DateTimeField(null=True)
-    created_at = DateTimeField(default=dt.datetime.utcnow)
-    updated_at = DateTimeField(default=dt.datetime.utcnow)
+    created_at = DateTimeField(default=_utc_now)
+    updated_at = DateTimeField(default=_utc_now)
 
     class Meta:
         database = DATABASE
@@ -50,8 +52,8 @@ class TickerHistoryCacheEntryModel(Model):
     last_record_date = DateTimeField(null=True)
     last_checked_at = DateTimeField(null=True)
     latest_adjusted_close = FloatField(null=True)
-    created_at = DateTimeField(default=dt.datetime.utcnow)
-    updated_at = DateTimeField(default=dt.datetime.utcnow)
+    created_at = DateTimeField(default=_utc_now)
+    updated_at = DateTimeField(default=_utc_now)
 
     class Meta:
         database = DATABASE
@@ -199,6 +201,65 @@ def _latest_adjusted_close(frame):
     return _coerce_float(value)
 
 
+def _filter_history_frame(frame, start, end):
+    if frame is None or frame.empty:
+        return None
+    return frame.loc[(frame.index >= start) & (frame.index <= end)].sort_index()
+
+
+def _latest_weekday(value):
+    timestamp = pd.Timestamp(value).normalize()
+    while timestamp.weekday() >= 5:
+        timestamp = timestamp - pd.Timedelta(days=1)
+    return timestamp
+
+
+def _combine_history_frames(frames):
+    valid_frames = [
+        _ensure_history_frame(frame)
+        for frame in frames
+        if frame is not None and not frame.empty
+    ]
+    valid_frames = [frame for frame in valid_frames if frame is not None]
+    if not valid_frames:
+        return None
+    combined = pd.concat(valid_frames, sort=False).sort_index()
+    return combined[~combined.index.duplicated(keep="last")]
+
+
+def _price_column_frame(frame):
+    if frame is None or frame.empty:
+        return None
+
+    if isinstance(frame.columns, pd.MultiIndex):
+        for price_label in ("Adj Close", "Close"):
+            if price_label in frame.columns.get_level_values(0):
+                selected = frame.xs(price_label, axis=1, level=0, drop_level=False)
+                if isinstance(selected, pd.DataFrame) and not selected.empty:
+                    selected = selected.iloc[:, :1]
+                    selected.columns = ["Adj Close"]
+                    return selected
+            if price_label in frame.columns.get_level_values(-1):
+                selected = frame.xs(price_label, axis=1, level=-1, drop_level=False)
+                if isinstance(selected, pd.DataFrame) and not selected.empty:
+                    selected = selected.iloc[:, :1]
+                    selected.columns = ["Adj Close"]
+                    return selected
+
+        selected = frame.iloc[:, :1].copy()
+        selected.columns = ["Adj Close"]
+        return selected
+
+    if "Close" in frame.columns and "Adj Close" not in frame.columns:
+        frame = frame.rename(columns={"Close": "Adj Close"})
+    if "Adj Close" in frame.columns:
+        return frame[["Adj Close"]]
+
+    selected = frame.iloc[:, :1].copy()
+    selected.columns = ["Adj Close"]
+    return selected
+
+
 def _build_entry_from_model(metadata_record, history_record):
     if metadata_record is None and history_record is None:
         return None
@@ -258,7 +319,7 @@ def upsert_ticker_cache_entry(symbol, *, history_frame=None, metadata=None, last
     if not normalized_symbol:
         return None
 
-    now = pd.Timestamp.utcnow().to_pydatetime()
+    now = _utc_now()
     metadata_record = TickerMetadataCacheEntryModel.get_or_none(TickerMetadataCacheEntryModel.symbol == normalized_symbol)
     history_record = TickerHistoryCacheEntryModel.get_or_none(TickerHistoryCacheEntryModel.symbol == normalized_symbol)
     existing_history = None
@@ -274,7 +335,7 @@ def upsert_ticker_cache_entry(symbol, *, history_frame=None, metadata=None, last
         elif existing_history is None:
             combined_history = incoming_history
         else:
-            combined = pd.concat([existing_history, incoming_history]).sort_index()
+            combined = pd.concat([existing_history, incoming_history], sort=False).sort_index()
             combined = combined[~combined.index.duplicated(keep="last")]
             combined_history = combined
     elif existing_history is not None:
@@ -321,20 +382,6 @@ def upsert_ticker_cache_entry(symbol, *, history_frame=None, metadata=None, last
         metadata_record.change_percent = _coerce_float(metadata_payload.get("change_percent"))
         metadata_record.currency = (metadata_payload.get("currency") or "") or None
         metadata_record.error = (metadata_payload.get("error") or "") or None
-    else:
-        metadata_record.metadata_json = metadata_record.metadata_json
-        metadata_record.name = metadata_record.name
-        metadata_record.quote_type = metadata_record.quote_type
-        metadata_record.category = metadata_record.category
-        metadata_record.family = metadata_record.family
-        metadata_record.sector = metadata_record.sector
-        metadata_record.industry = metadata_record.industry
-        metadata_record.exchange = metadata_record.exchange
-        metadata_record.market_cap = metadata_record.market_cap
-        metadata_record.price = metadata_record.price
-        metadata_record.change_percent = metadata_record.change_percent
-        metadata_record.currency = metadata_record.currency
-        metadata_record.error = metadata_record.error
 
     metadata_record.last_checked_at = _format_datetime(last_checked_at or now)
     metadata_record.updated_at = now
@@ -351,58 +398,81 @@ def fetch_history_with_cache(symbol, start, end):
         return None, {"used_saved_cache": False, "refreshed_cache": False}
 
     requested_start = pd.Timestamp(start).normalize()
-    requested_end = pd.Timestamp(end).normalize()
+    requested_end = _latest_weekday(end)
+    if requested_start > requested_end:
+        return None, {"used_saved_cache": False, "refreshed_cache": False}
     cached_entry = load_ticker_cache_entry(normalized_symbol)
 
     if cached_entry is None or cached_entry.history_frame is None or cached_entry.history_frame.empty:
-        latest_frame = _download_history_frame(normalized_symbol, requested_start, requested_end)
-        refresh_ticker_history(normalized_symbol, latest_frame, metadata={})
-        return latest_frame, {"used_saved_cache": False, "refreshed_cache": True}
+        full_frame = _download_full_history_frame(normalized_symbol, requested_end)
+        refreshed_cache = full_frame is not None and not full_frame.empty
+        if refreshed_cache:
+            refresh_ticker_history(normalized_symbol, full_frame, metadata={})
+        filtered = _filter_history_frame(full_frame, requested_start, requested_end)
+        return filtered, {"used_saved_cache": False, "refreshed_cache": refreshed_cache}
 
     cached_history = cached_entry.history_frame.copy()
-    if cached_entry.last_record_date is not None:
-        if cached_entry.last_record_date >= requested_end:
-            filtered = cached_history.loc[(cached_history.index >= requested_start) & (cached_history.index <= requested_end)]
-            return filtered, {"used_saved_cache": True, "refreshed_cache": False}
-        refresh_start = max(requested_start, (cached_entry.last_record_date + pd.Timedelta(days=1)).normalize())
-    else:
-        refresh_start = requested_start
+    cached_start = cached_history.index.min().normalize()
+    cached_end = cached_history.index.max().normalize()
+    missing_frames = []
 
-    if refresh_start > requested_end:
-        filtered = cached_history.loc[(cached_history.index >= requested_start) & (cached_history.index <= requested_end)]
-        return filtered, {"used_saved_cache": True, "refreshed_cache": False}
+    if requested_start < cached_start:
+        earlier_end = (cached_start - pd.Timedelta(days=1)).normalize()
+        earlier_history = _download_full_history_frame(normalized_symbol, earlier_end)
+        if earlier_history is not None and not earlier_history.empty:
+            missing_frames.append(earlier_history)
 
-    downloaded_history = _download_history_frame(normalized_symbol, refresh_start, requested_end)
-    if downloaded_history is None or downloaded_history.empty:
-        filtered = cached_history.loc[(cached_history.index >= requested_start) & (cached_history.index <= requested_end)]
-        return filtered, {"used_saved_cache": True, "refreshed_cache": False}
+    if cached_end < requested_end:
+        later_start = (cached_end + pd.Timedelta(days=1)).normalize()
+        later_history = _download_history_frame(normalized_symbol, later_start, requested_end)
+        if later_history is not None and not later_history.empty:
+            missing_frames.append(later_history)
 
-    combined_history = pd.concat([cached_history, downloaded_history]).sort_index()
-    combined_history = combined_history[~combined_history.index.duplicated(keep="last")]
-    refresh_ticker_history(normalized_symbol, combined_history, metadata={})
-    filtered = combined_history.loc[(combined_history.index >= requested_start) & (combined_history.index <= requested_end)]
-    return filtered, {"used_saved_cache": True, "refreshed_cache": True}
+    if missing_frames:
+        combined_history = _combine_history_frames([cached_history, *missing_frames])
+        refresh_ticker_history(normalized_symbol, combined_history, metadata={})
+        filtered = _filter_history_frame(combined_history, requested_start, requested_end)
+        return filtered, {"used_saved_cache": True, "refreshed_cache": True}
+
+    filtered = _filter_history_frame(cached_history, requested_start, requested_end)
+    return filtered, {"used_saved_cache": True, "refreshed_cache": False}
 
 
-def _download_history_frame(symbol, start, end):
-    if pd.Timestamp(start) >= pd.Timestamp(end):
-        return None
-    try:
-        data = yf.download(symbol, start=start, end=end, progress=False, auto_adjust=True)
-    except Exception:
-        return None
+def _prepare_downloaded_history(data):
     if data is None or data.empty:
         return None
     if isinstance(data, pd.Series):
         frame = data.to_frame()
     else:
         frame = data.copy()
-    if "Close" in frame.columns and "Adj Close" not in frame.columns:
-        frame = frame.rename(columns={"Close": "Adj Close"})
-    if "Adj Close" in frame.columns:
-        frame = frame[["Adj Close"]]
-    else:
-        frame = frame.iloc[:, :1]
-    frame.columns = ["Adj Close"]
+    frame = _price_column_frame(frame)
+    if frame is None or frame.empty:
+        return None
     frame = frame[~frame.index.duplicated(keep="last")]
     return frame.sort_index()
+
+
+def _download_full_history_frame(symbol, end):
+    requested_end = pd.Timestamp(end).normalize()
+    try:
+        data = yf.download(symbol, period="max", progress=False, auto_adjust=True)
+    except Exception:
+        return None
+
+    frame = _prepare_downloaded_history(data)
+    if frame is None:
+        return None
+    return frame.loc[frame.index <= requested_end].sort_index()
+
+
+def _download_history_frame(symbol, start, end):
+    requested_start = pd.Timestamp(start).normalize()
+    requested_end = pd.Timestamp(end).normalize()
+    if requested_start > requested_end:
+        return None
+    exclusive_end = requested_end + pd.Timedelta(days=1)
+    try:
+        data = yf.download(symbol, start=requested_start, end=exclusive_end, progress=False, auto_adjust=True)
+    except Exception:
+        return None
+    return _prepare_downloaded_history(data)

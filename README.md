@@ -15,7 +15,8 @@ This app lets you:
 - **Saved configurations**: save and load named dashboard setups for each user.
 - **Database storage**: user accounts and saved configurations are stored in a local SQLite database.
 - **Auto peers**: discover related securities for ETFs, mutual funds, and stocks.
-- **Snapshot caching**: data snapshots are saved with each configuration, reducing repeated downloads.
+- **Shared ticker caching**: downloaded ticker metadata and adjusted-close price history are stored in a centralized SQLite cache and reused across users.
+- **Snapshot caching**: data snapshots are also saved with each configuration for fast dashboard restores.
 
 ## Quick start
 
@@ -51,16 +52,17 @@ This app lets you:
 3. Sign in or register in the sidebar to keep your personal configurations.
 4. When signed in, the app restores your last used saved configuration automatically.
 
-## User data location
+## Data Storage
 
-The app stores user data in your platform-specific config directory under:
+The app stores user data in your platform-specific config directory. On Linux, the default files are:
 
-- `~/.config/pgStocks/pgStocks_users.db` on Linux
+- `~/.config/pgStocks/pgStocks_users.db` for users and saved configurations
+- `~/.config/pgStocks/pgStocks_ticker_cache.db` for shared ticker metadata and price history
 
-Saved configurations and user accounts are persisted there.
+The ticker cache is shared by all users of the local app. It keeps the longest history it has seen for each ticker, backfills older missing ranges when a user asks for a longer period, and appends newer dates as needed so Yahoo Finance is only called for missing or refreshed market data.
 
 ## Notes
 
 - If you are not signed in, the app still works as a guest using the local JSON state file.
-- The app uses `yfinance` for market and peer metadata.
+- The app uses `yfinance` for market prices, security metadata, and peer screening.
 - Existing saved configurations are kept per user and are not shared across accounts.
