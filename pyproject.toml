@@ -1,0 +1,24 @@
+[project]
+name = "stock"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "PGilm", email = "PhilipGilman@gmail.com" }
+]
+requires-python = ">=3.11"
+dependencies = [
+    "matplotlib>=3.11.1",
+    "peewee>=4.3.0",
+    "platformdirs>=4.11.1",
+    "streamlit>=1.61.1",
+    "watchdog>=6.0.0",
+    "yfinance>=1.5.2",
+]
+
+[project.scripts]
+stock = "stock:main"
+
+[build-system]
+requires = ["uv_build>=0.12.3,<0.13.0"]
+build-backend = "uv_build"
