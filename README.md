@@ -3,7 +3,7 @@
 A Streamlit app for tracking stock, ETF, and index performance with per-user saved configuration storage.
 
 This app lets you:
-- compare normalized performance for multiple tickers over selected time periods
+- compare normalized performance for multiple tickers over selected time periods, including the maximum available Yahoo Finance history
 - measure rolling beta and Sharpe ratio relative to a baseline index
 - discover peer funds or stocks automatically from a peer source ticker
 - save named dashboard configurations per user
@@ -47,7 +47,7 @@ This app lets you:
    - a baseline index for risk metrics
    - a peer source ticker for related-security discovery
    - manual peer overrides and peer count
-   - the analysis period, beta/sharpe options, and risk-free rate
+   - the analysis period, including `Max` for all available Yahoo Finance history, beta/sharpe options, and risk-free rate
 2. Save your current configuration using a memorable name.
 3. Sign in or register in the sidebar to keep your personal configurations.
 4. When signed in, the app restores your last used saved configuration automatically.

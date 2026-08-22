@@ -499,6 +499,7 @@ def _is_transient_lookup_error(error_message):
 
     normalized = str(error_message).upper()
     transient_markers = (
+        "401",
         "429",
         "CONNECTION",
         "RATE LIMIT",
@@ -507,8 +508,24 @@ def _is_transient_lookup_error(error_message):
         "TIMED OUT",
         "TOO MANY REQUESTS",
         "TRY AFTER A WHILE",
+        "UNAUTHORIZED",
     )
     return any(marker in normalized for marker in transient_markers)
+
+
+def _format_lookup_error(error_message, *, context):
+    normalized = str(error_message or "").strip()
+    if not normalized:
+        return f"{context} is unavailable right now."
+
+    upper_message = normalized.upper()
+    if "401" in upper_message or "UNAUTHORIZED" in upper_message:
+        return (
+            f"{context} was rejected by Yahoo Finance with a 401 Unauthorized response. "
+            "Price history may still work; add manual peers or try automatic lookup again later."
+        )
+
+    return normalized
 
 
 def _ensure_price_frame(close_data):
@@ -849,6 +866,26 @@ def _append_ranked_peers(
     return added_count
 
 
+def _normalize_strategy_tokens(tokens):
+    normalized_tokens = []
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        next_token = tokens[index + 1] if index + 1 < len(tokens) else None
+
+        if token in {"F", "R"} and next_token in {"1", "2", "3", "4", "5", "6"}:
+            index += 2
+            continue
+        if token == "529" and next_token in {"A", "B", "C", "D", "E", "F"}:
+            index += 2
+            continue
+
+        normalized_tokens.append(token)
+        index += 1
+
+    return normalized_tokens
+
+
 def _normalize_strategy_name(value):
     if not value:
         return None
@@ -859,11 +896,14 @@ def _normalize_strategy_name(value):
         "FIDELITY": " ",
         "AMERICAN FUNDS": " ",
         "CAPITAL GROUP": " ",
+        "CHARLES SCHWAB": " ",
         "SCHWAB": " ",
         "BLACKROCK": " ",
         "ISHARES": " ",
         "STATE STREET": " ",
         "SPDR": " ",
+        "T ROWE PRICE": " ",
+        "T. ROWE PRICE": " ",
         "INDEX TRUST": " ",
         "TRUST": " ",
         "FUND": " ",
@@ -873,6 +913,7 @@ def _normalize_strategy_name(value):
         "INSTITUTIONAL": " ",
         "INST": " ",
         "SERVICE": " ",
+        "SHARES": " ",
         "CLASS": " ",
         "CL": " ",
     }
@@ -897,6 +938,8 @@ def _normalize_strategy_name(value):
         "B",
         "C",
         "ADM",
+        "ADV",
+        "ADVISOR",
         "F1",
         "F2",
         "F3",
@@ -917,6 +960,7 @@ def _normalize_strategy_name(value):
         "SELECT",
         "Y",
         "Z",
+        "529",
         "529A",
         "529B",
         "529C",
@@ -925,8 +969,9 @@ def _normalize_strategy_name(value):
         "529F",
     }
 
+    tokens = _normalize_strategy_tokens(normalized.split())
     normalized_tokens = []
-    for token in normalized.split():
+    for token in tokens:
         if token in share_class_tokens:
             continue
         normalized_tokens.extend(token_map.get(token, [token]))
@@ -1042,9 +1087,60 @@ def _make_screen_query(query_class, category, exchange):
     return query_class("and", clauses)
 
 
+def _screen_fund_peers(query_class, category, exchange, request_size):
+    query_attempts = [_make_screen_query(query_class, category, exchange)]
+    if exchange:
+        query_attempts.append(_make_screen_query(query_class, category, None))
+
+    last_error = None
+    for query in query_attempts:
+        try:
+            return yf.screen(
+                query,
+                size=request_size,
+                sortField="fundnetassets",
+                sortAsc=False,
+            )
+        except Exception as exc:
+            last_error = exc
+            if _is_transient_lookup_error(exc):
+                raise TransientLookupError(str(exc)) from exc
+
+    if last_error is not None:
+        raise last_error
+    return {}
+
+
+def _screen_equity_peers(sector, industry, request_size):
+    query_attempts = []
+    if industry:
+        query_attempts.append(("industry", industry))
+    if sector:
+        query_attempts.append(("sector", sector))
+
+    last_error = None
+    for peer_field, peer_value in query_attempts:
+        try:
+            response = yf.screen(
+                yf.EquityQuery("eq", [peer_field, peer_value]),
+                size=request_size,
+                sortField="ticker",
+                sortAsc=True,
+            )
+            return response, peer_field, peer_value
+        except Exception as exc:
+            last_error = exc
+            if _is_transient_lookup_error(exc):
+                raise TransientLookupError(str(exc)) from exc
+
+    if last_error is not None:
+        raise last_error
+    return {}, None, None
+
+
 @st.cache_data(show_spinner=False, ttl=3600)
 def _discover_peer_funds_cached(
-    ticker, category, quote_type, exchange, source_family, peer_limit
+    ticker, category, quote_type, exchange, source_family, source_name, peer_limit
 ):
     if not category:
         return [], "No category was found for the selected peer source fund.", None
@@ -1063,16 +1159,11 @@ def _discover_peer_funds_cached(
 
     request_size = min(max(peer_limit * 12, 25), 100)
     try:
-        response = yf.screen(
-            _make_screen_query(query_class, category, exchange),
-            size=request_size,
-            sortField="fundnetassets",
-            sortAsc=False,
-        )
+        response = _screen_fund_peers(query_class, category, exchange, request_size)
     except Exception as exc:
         if _is_transient_lookup_error(exc):
             raise TransientLookupError(str(exc)) from exc
-        return [], str(exc), None
+        return [], _format_lookup_error(exc, context="Automatic fund peer lookup"), None
 
     quotes = response.get("quotes", []) if isinstance(response, dict) else []
     candidates = []
@@ -1142,7 +1233,8 @@ def _discover_peer_funds_cached(
     peers = []
     selection_note = None
     used_providers = set()
-    used_strategies = set()
+    source_strategy_key = _normalize_strategy_name(source_name or ticker)
+    used_strategies = {source_strategy_key} if source_strategy_key else set()
     selected_tickers = set()
     source_provider = _normalize_provider_name(source_family)
 
@@ -1189,26 +1281,11 @@ def _discover_peer_funds_cached(
             source_provider=source_provider,
         )
     )
-    phase_counts.append(
-        _append_ranked_peers(
-            peers,
-            candidates,
-            selected_tickers,
-            used_providers,
-            used_strategies,
-            peer_limit,
-            allow_used_provider=True,
-            allow_source_provider=True,
-            allow_used_strategy=True,
-            source_provider=source_provider,
-        )
-    )
-
     if len(peers) < peer_limit:
         selection_note = (
-            f"Only {len(peers)} eligible peers were available after relaxing provider and strategy matching."
+            f"Only {len(peers)} eligible peers were available after removing duplicate strategies and share classes."
         )
-    elif phase_counts[1] > 0 or phase_counts[2] > 0 or phase_counts[3] > 0:
+    elif phase_counts[1] > 0 or phase_counts[2] > 0:
         selection_note = (
             "Provider diversity was relaxed to fill the requested peer count."
         )
@@ -1217,14 +1294,20 @@ def _discover_peer_funds_cached(
 
 
 def discover_peer_funds(
-    ticker, category, quote_type, exchange, source_family, peer_limit
+    ticker, category, quote_type, exchange, source_family, source_name, peer_limit
 ):
     try:
         return _discover_peer_funds_cached(
-            ticker, category, quote_type, exchange, source_family, peer_limit
+            ticker,
+            category,
+            quote_type,
+            exchange,
+            source_family,
+            source_name,
+            peer_limit,
         )
     except TransientLookupError as exc:
-        return [], str(exc), None
+        return [], _format_lookup_error(exc, context="Automatic fund peer lookup"), None
 
 
 def _coerce_equity_market_cap(quote):
@@ -1276,9 +1359,7 @@ def _score_equity_peer(candidate, source_market_cap):
 def _discover_peer_stocks_cached(
     ticker, sector, industry, exchange, source_market_cap, peer_limit
 ):
-    peer_field = "industry" if industry else "sector"
-    peer_value = industry or sector
-    if not peer_value:
+    if not industry and not sector:
         return [], "No industry or sector was found for the selected stock.", None
 
     if not hasattr(yf, "EquityQuery") or not hasattr(yf, "screen"):
@@ -1286,16 +1367,13 @@ def _discover_peer_stocks_cached(
 
     request_size = min(max(peer_limit * 25, 60), 250)
     try:
-        response = yf.screen(
-            yf.EquityQuery("eq", [peer_field, peer_value]),
-            size=request_size,
-            sortField="ticker",
-            sortAsc=True,
+        response, peer_field, peer_value = _screen_equity_peers(
+            sector, industry, request_size
         )
     except Exception as exc:
         if _is_transient_lookup_error(exc):
             raise TransientLookupError(str(exc)) from exc
-        return [], str(exc), None
+        return [], _format_lookup_error(exc, context="Automatic stock peer lookup"), None
 
     quotes = response.get("quotes", []) if isinstance(response, dict) else []
     candidates = []
@@ -1372,6 +1450,10 @@ def _discover_peer_stocks_cached(
         selection_note = (
             f"Only {len(selected_peers)} related stocks were available for the selected screening criteria."
         )
+    elif industry and peer_field == "sector":
+        selection_note = (
+            "Industry screening was unavailable, so sector screening was used instead."
+        )
     elif phase_counts[2] > 0 or phase_counts[3] > 0 or phase_counts[4] > 0:
         selection_note = (
             "Exchange and market-cap matching were relaxed to fill the requested peer count."
@@ -1388,7 +1470,7 @@ def discover_peer_stocks(
             ticker, sector, industry, exchange, source_market_cap, peer_limit
         )
     except TransientLookupError as exc:
-        return [], str(exc), None
+        return [], _format_lookup_error(exc, context="Automatic stock peer lookup"), None
 
 
 def build_peer_table(manual_peers, auto_peers, peer_source, peer_source_metadata):
@@ -1563,6 +1645,7 @@ if st.session_state.get("loaded_store_identity") != current_store_identity:
     st.session_state["loaded_store_identity"] = current_store_identity
 
 period_options = {
+    "Max": None,
     "5 Years": pd.DateOffset(years=5),
     "3 Years": pd.DateOffset(years=3),
     "1 Year": pd.DateOffset(years=1),
@@ -1813,6 +1896,7 @@ if peer_source:
                 peer_source_metadata["quote_type"],
                 peer_source_metadata["exchange"],
                 peer_source_metadata["family"],
+                peer_source_metadata["name"],
                 peer_count,
             )
         elif _is_equity_quote_type(peer_source_metadata["quote_type"]):
@@ -1844,7 +1928,12 @@ else:
     comparison_tickers = dedupe_tickers(comparison_tickers)
 
 end = pd.Timestamp.today()
-start = end - period_options[selected_period]
+selected_period_offset = period_options[selected_period]
+start = (
+    pd.Timestamp("1900-01-01")
+    if selected_period_offset is None
+    else end - selected_period_offset
+)
 required_symbols = dedupe_tickers(comparison_tickers + [market])
 download_symbols = list(required_symbols)
 
@@ -2137,6 +2226,8 @@ else:
 
     if peer_lookup_error and enable_auto_peers:
         st.info(f"Automatic peer lookup is unavailable right now: {peer_lookup_error}")
+    elif peer_lookup_note and enable_auto_peers:
+        st.info(peer_lookup_note)
 
     peer_table = build_peer_table(
         manual_peers, auto_peers, peer_source, peer_source_metadata
