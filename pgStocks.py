@@ -416,7 +416,62 @@ def _first_present(mapping, keys):
 def _normalize_provider_name(value):
     if not value:
         return None
-    return " ".join(str(value).strip().upper().split())
+    normalized = str(value).upper()
+    for separator in ("&", "/", ",", ".", "-", "(", ")"):
+        normalized = normalized.replace(separator, " ")
+    normalized = re.sub(r"[^A-Z0-9]+", " ", normalized)
+    normalized = " ".join(normalized.split())
+
+    alias_map = {
+        "AMERICAN FUNDS DISTRIBUTOR": "AMERICAN FUNDS",
+        "AMERICAN FUNDS INC": "AMERICAN FUNDS",
+        "AMERICAN FUNDS CORPORATION": "AMERICAN FUNDS",
+        "AMERICAN FUNDS COMPANY": "AMERICAN FUNDS",
+        "FIDELITY INVESTMENTS": "FIDELITY",
+        "FIDELITY INVESTMENT": "FIDELITY",
+        "FIDELITY INC": "FIDELITY",
+        "FIDELITY CORPORATION": "FIDELITY",
+        "VANGUARD GROUP": "VANGUARD",
+        "VANGUARD INVESTMENTS": "VANGUARD",
+        "CHARLES SCHWAB CORPORATION": "SCHWAB",
+        "SCHWAB INVESTMENTS": "SCHWAB",
+        "T ROWE PRICE GROUP": "T ROWE PRICE",
+        "T ROWE PRICE ASSOCIATES": "T ROWE PRICE",
+        "BLACKROCK FUND ADVISORS": "BLACKROCK",
+        "STATE STREET GLOBAL ADVISORS": "STATE STREET",
+    }
+    if normalized in alias_map:
+        return alias_map[normalized]
+
+    tokens = []
+    excluded_tokens = {
+        "CO",
+        "COMPANY",
+        "CORP",
+        "CORPORATION",
+        "DISTRIBUTOR",
+        "DISTRIBUTORS",
+        "INC",
+        "INCORPORATED",
+        "LTD",
+        "LLC",
+        "LP",
+        "LIMITED",
+        "GROUP",
+        "INVESTMENT",
+        "INVESTMENTS",
+        "ASSOCIATES",
+        "ADVISORS",
+        "ADVISOR",
+    }
+    for token in normalized.split():
+        if token in excluded_tokens:
+            continue
+        tokens.append(token)
+    canonical = " ".join(tokens) if tokens else None
+    if canonical in alias_map:
+        return alias_map[canonical]
+    return canonical
 
 
 def _infer_provider_from_fund_name(name):
@@ -831,6 +886,7 @@ def _append_ranked_peers(
     selected_tickers,
     used_providers,
     used_strategies,
+    used_strategy_assets,
     peer_limit,
     *,
     allow_used_provider,
@@ -847,20 +903,33 @@ def _append_ranked_peers(
 
         provider = candidate["Provider"]
         strategy_key = candidate["StrategyKey"]
+        provider_strategy_signature = (
+            provider,
+            strategy_key,
+        ) if provider != "UNKNOWN" and strategy_key else None
+        strategy_asset_signature = (
+            provider,
+            strategy_key,
+            candidate["Assets"],
+        ) if provider != "UNKNOWN" and strategy_key else None
 
         if not allow_used_provider and provider != "UNKNOWN" and provider in used_providers:
             continue
         if not allow_source_provider and source_provider and provider == source_provider:
             continue
-        if not allow_used_strategy and strategy_key and strategy_key in used_strategies:
+        if not allow_used_strategy and provider_strategy_signature and provider_strategy_signature in used_strategies:
+            continue
+        if strategy_asset_signature and strategy_asset_signature in used_strategy_assets:
             continue
 
         selected_peers.append(candidate)
         selected_tickers.add(candidate["Ticker"])
         if provider != "UNKNOWN":
             used_providers.add(provider)
-        if strategy_key:
-            used_strategies.add(strategy_key)
+        if provider_strategy_signature is not None:
+            used_strategies.add(provider_strategy_signature)
+        if strategy_asset_signature is not None:
+            used_strategy_assets.add(strategy_asset_signature)
         added_count += 1
 
     return added_count
@@ -944,7 +1013,13 @@ def _normalize_strategy_name(value):
         "F2",
         "F3",
         "I",
+        "IN",
+        "INST",
+        "INSTL",
+        "INSTITUTIONAL",
         "INV",
+        "INVEST",
+        "INVESTOR",
         "K",
         "L",
         "PL",
@@ -1237,6 +1312,7 @@ def _discover_peer_funds_cached(
     used_strategies = {source_strategy_key} if source_strategy_key else set()
     selected_tickers = set()
     source_provider = _normalize_provider_name(source_family)
+    used_strategy_assets = set()
 
     phase_counts = []
     phase_counts.append(
@@ -1246,6 +1322,7 @@ def _discover_peer_funds_cached(
             selected_tickers,
             used_providers,
             used_strategies,
+            used_strategy_assets,
             peer_limit,
             allow_used_provider=False,
             allow_source_provider=False,
@@ -1260,6 +1337,7 @@ def _discover_peer_funds_cached(
             selected_tickers,
             used_providers,
             used_strategies,
+            used_strategy_assets,
             peer_limit,
             allow_used_provider=True,
             allow_source_provider=False,
@@ -1274,6 +1352,7 @@ def _discover_peer_funds_cached(
             selected_tickers,
             used_providers,
             used_strategies,
+            used_strategy_assets,
             peer_limit,
             allow_used_provider=True,
             allow_source_provider=True,

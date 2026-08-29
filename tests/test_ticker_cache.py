@@ -15,6 +15,51 @@ from ticker_cache import (
     upsert_ticker_cache_entry,
 )
 
+import pgStocks
+
+
+def test_fund_strategy_normalization_removes_duplicate_share_class_suffixes():
+    first = "Vanguard MStar Total Stk Mkt Idx Instl"
+    second = "Vanguard MStar Total Stk Mkt Idx Invest"
+    third = "Vanguard Institutional Index Instl Pl"
+    fourth = "Vanguard Institutional Index Investor"
+
+    assert pgStocks._normalize_strategy_name(first) == pgStocks._normalize_strategy_name(second)
+    assert pgStocks._normalize_strategy_name(third) == pgStocks._normalize_strategy_name(fourth)
+
+
+def test_same_strategy_is_allowed_across_different_providers():
+    candidates = [
+        {"Ticker": "VITSX", "Provider": "VANGUARD", "StrategyKey": "INDEX", "Assets": 2.29e12},
+        {"Ticker": "SWPPX", "Provider": "SCHWAB", "StrategyKey": "INDEX", "Assets": 3.1e11},
+        {"Ticker": "FZROX", "Provider": "FIDELITY INVESTMENTS", "StrategyKey": "INDEX", "Assets": 4.2e11},
+    ]
+
+    selected = []
+    _append_ranked_peers = pgStocks._append_ranked_peers
+    _append_ranked_peers(
+        selected,
+        candidates,
+        set(),
+        set(),
+        set(),
+        set(),
+        10,
+        allow_used_provider=True,
+        allow_source_provider=True,
+        allow_used_strategy=False,
+        source_provider="FIDELITY INVESTMENTS",
+    )
+
+    assert [peer["Ticker"] for peer in selected] == ["VITSX", "SWPPX", "FZROX"]
+
+
+def test_provider_normalization_collapses_same_family_variants():
+    assert pgStocks._normalize_provider_name("American Funds, Inc.") == "AMERICAN FUNDS"
+    assert pgStocks._normalize_provider_name("Fidelity") == "FIDELITY"
+    assert pgStocks._normalize_provider_name("Fidelity Investments") == "FIDELITY"
+    assert pgStocks._normalize_provider_name("Fidelity Investments, Inc.") == "FIDELITY"
+
 
 def test_upsert_updates_history_and_latest_record_date(tmp_path):
     db_path = tmp_path / "ticker-cache.db"

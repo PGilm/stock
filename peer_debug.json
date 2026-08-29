@@ -1,0 +1,72 @@
+{
+  "5": {
+    "note": "Provider diversity was relaxed to fill the requested peer count.",
+    "selected": [
+      {
+        "Ticker": "VITSX",
+        "Provider": "VANGUARD",
+        "StrategyKey": "MSTAR TOTAL STOCK MARKET INDEX",
+        "Assets": 2290000000000.0
+      },
+      {
+        "Ticker": "ITOT",
+        "Provider": "BLACKROCK",
+        "StrategyKey": "CORE S P TOTAL US STOCK MARKET ETF",
+        "Assets": 500000000000.0
+      },
+      {
+        "Ticker": "VTIAX",
+        "Provider": "VANGUARD",
+        "StrategyKey": "TOTAL STOCK MARKET INDEX",
+        "Assets": 350000000000.0
+      },
+      {
+        "Ticker": "VIIIX",
+        "Provider": "VANGUARD",
+        "StrategyKey": "INDEX",
+        "Assets": 347780000000.0
+      },
+      {
+        "Ticker": "FZROX",
+        "Provider": "FIDELITY INVESTMENTS",
+        "StrategyKey": "ZERO TOTAL MARKET INDEX",
+        "Assets": 420000000000.0
+      }
+    ]
+  },
+  "6": {
+    "note": "Only 5 eligible peers were available after removing duplicate strategies and share classes.",
+    "selected": [
+      {
+        "Ticker": "VITSX",
+        "Provider": "VANGUARD",
+        "StrategyKey": "MSTAR TOTAL STOCK MARKET INDEX",
+        "Assets": 2290000000000.0
+      },
+      {
+        "Ticker": "ITOT",
+        "Provider": "BLACKROCK",
+        "StrategyKey": "CORE S P TOTAL US STOCK MARKET ETF",
+        "Assets": 500000000000.0
+      },
+      {
+        "Ticker": "VTIAX",
+        "Provider": "VANGUARD",
+        "StrategyKey": "TOTAL STOCK MARKET INDEX",
+        "Assets": 350000000000.0
+      },
+      {
+        "Ticker": "VIIIX",
+        "Provider": "VANGUARD",
+        "StrategyKey": "INDEX",
+        "Assets": 347780000000.0
+      },
+      {
+        "Ticker": "FZROX",
+        "Provider": "FIDELITY INVESTMENTS",
+        "StrategyKey": "ZERO TOTAL MARKET INDEX",
+        "Assets": 420000000000.0
+      }
+    ]
+  }
+}
