@@ -1,15 +1,41 @@
-# TO DO 
+# TO DO
+
+## Latest Aug 22
+
+Working on auto peer selection.  note this one is illustrative:
+Peer source: FXAIX (Fidelity 500 Index) | Category: Large Blend | Family: Fidelity Investments -- Provider diversity was relaxed to fill the requested peer count.
+
+![Peers](./Peer Lookup 2026-08-22.png)
+
+[Table](./Peer Table 2026-08-22.csv)
+
+Where you can see how "Vanguard MStar Total Stk Mkt Idx Instl Large Blend Vanguard \$2.29T" is similar to the "Vanguard MStar Total Stk Mkt Idx Invest Large Blend Vanguard \$2.29T" and they need not both be listed while seeing that the "Vanguard Institutional Index Instl Pl Large Blend Vanguard \$347.78B" as something different.
+
+
+
+And notice with 6 selected:
+
+![](/Users/pg/Library/Application%20Support/marktext/images/2026-08-22-13-46-31-image.png)
+
+So there were diverse selections available.
+
+
+
+## Older
+
 ### in no particular order
 
 1. Rewrite README.md to reflect current app features functions and operation, as well as providing hints about what to do with it.
 
 2. Personalize individual user experiences:
-	1. Study the code at https://github.com/Sven-Bo/streamlit-sales-dashboard-with-userauthentication-database.git
-	1. Review the demo app
-	1. Add to the stock app a login page and database storage for the saved configurations
-	1. Customize output display to the saved user-specific configuration including generally restoring the last used configuration when the user logs in.
+   
+   1. Study the code at https://github.com/Sven-Bo/streamlit-sales-dashboard-with-userauthentication-database.git
+   2. Review the demo app
+   3. Add to the stock app a login page and database storage for the saved configurations
+   4. Customize output display to the saved user-specific configuration including generally restoring the last used configuration when the user logs in.
 
-# Some Claude suggestions:
+## Some Claude suggestions:
+
 New, significant finding: the shared ticker cache never backfills the start of a date range
 This is the most important thing the new file reveals. In `fetch_history_with_cache`:
 
@@ -20,6 +46,7 @@ if cached_entry.last_record_date is not None:
         return filtered, {"used_saved_cache": True, "refreshed_cache": False}
     refresh_start = max(requested_start, (cached_entry.last_record_date + pd.Timedelta(days=1)).normalize())
 ```
+
 This only checks that the cache is fresh enough at the end of the range (`last_record_date >= requested_end`). It never checks whether the cache actually reaches back to `requested_start`. 
 
 If it's "fresh" at the end, it just filters whatever's already cached — it never downloads further back, no matter how short the cached history actually is.
@@ -50,7 +77,9 @@ Harmless, but it's dead code — assigning a field to itself changes nothing. Wa
 
 + Possible `yf.download` column-shape mismatch (unconfirmed). `_download_history_frame` checks `if "Close" in frame.columns` to normalize column names. Depending on the installed yfinance version, a single-ticker yf.download() call can return a MultiIndex-columned frame (e.g., ('Close', 'AAPL')), in which case the plain-string membership check would miss and fall through to frame.iloc[:, :1] — silently grabbing whatever the first column happens to be (possibly Open, not Close) and mislabeling it "Adj Close". I don't have your requirements.txt/pinned yfinance version to confirm this actually triggers, so treat it as "worth a quick manual check," not a confirmed bug.
 + Duplicated serialization logic. `pgStocks.py`'s `_serialize_price_frame`/`_deserialize_price_frame` and `ticker_cache.py`'s `_serialize_history_frame`/`_deserialize_history_frame` implement the same index/columns/data JSON scheme independently. Not a bug, but a maintenance smell — a schema tweak in one place won't propagate to the other.
-README gap. The README documents only the user-accounts DB (pgStocks_users.db) location, not the separate shared pgStocks_ticker_cache.db that ticker_cache.py creates in the same config directory. Given the bug above is a direct consequence of that cache being shared and undocumented, it's worth adding a line about it (and maybe a way to clear/reset it).
+  README gap. The README documents only the user-accounts DB (pgStocks_users.db) location, not the separate shared pgStocks_ticker_cache.db that ticker_cache.py creates in the same config directory. Given the bug above is a direct consequence of that cache being shared and undocumented, it's worth adding a line about it (and maybe a way to clear/reset it).
 
 Everything else from before still stands unchanged
 Empty "Baseline Index" crash, peer_lookup_note never displayed, manual peers not excluded before auto-peer discovery runs, the static/global password salt, unclosed matplotlib figures, and the unused local widget variables (market_input, peer_source_input, manual_peer_input, risk_free_rate_pct) — none of these touch ticker_cache.py, so my original assessment holds as-is.
+
+## New Nores for after Aug 22:
